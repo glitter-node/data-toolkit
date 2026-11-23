@@ -1,0 +1,120 @@
+const $=id=>document.getElementById(id);let activeTab="convert",currentJob=null,sourceColumns=[];const translations=window.DataToolkitI18n.group("main");let statusTranslation="ready";function status(t){statusTranslation=null;$("status").textContent=t}function statusKey(key){statusTranslation=key;$("status").textContent=window.DataToolkitI18n.t(key)}function setLocale(code){window.DataToolkitI18n.setLocale(code);if(statusTranslation)$("status").textContent=window.DataToolkitI18n.t(statusTranslation);updateFileSummary()}function options(){const cols=Array.from($("columns").selectedOptions).map(x=>x.value);const value={};if(cols.length&&cols.length<sourceColumns.length)value.columns=cols;const rename=$("rename").value.trim();if(rename)value.rename=JSON.parse(rename);if($("filterCol").value)value.filters=[{column:$("filterCol").value,operator:$("filterOp").value,value:$("filterVal").value}];if($("sortCol").value)value.sort={column:$("sortCol").value,descending:$("descending").value==="true"};if($("dedup").checked)value.deduplicate=true;return value}function render(data){sourceColumns=data.columns;const head=document.createElement("tr");$("table").replaceChildren();for(const c of data.columns){const th=document.createElement("th");th.textContent=c;head.append(th)}$("table").append(head);for(const row of data.preview){const tr=document.createElement("tr");for(const c of data.columns){const td=document.createElement("td");td.textContent=row[c]==null?"":String(row[c]);tr.append(td)}$("table").append(tr)}$("stats").textContent=window.DataToolkitI18n.t("rowsSummary",{rows:data.row_count,columns:data.columns.length});for(const id of ["columns","filterCol","sortCol"]){const el=$(id);el.replaceChildren();if(id!=="columns"){const empty=document.createElement("option");empty.value="";empty.textContent=window.DataToolkitI18n.t("none");el.append(empty)}for(const c of data.columns){const opt=document.createElement("option");opt.value=c;opt.textContent=c;if(id==="columns")opt.selected=true;el.append(opt)}}}function updateFileSummary(){const files=Array.from($("file").files);const language=$("locale").value;const t=translations[language]||translations.ko;const summary=$("selectedFiles");summary.removeAttribute("data-i18n");if(!files.length){summary.textContent=t.noFiles;return}if(files.length===1){summary.textContent=files[0].name;return}summary.textContent=language==="ko"?`${files.length}${t.filesSelected}`:language==="ja"||language==="zh-CN"?`${files.length}${t.filesSelected}`:`${files.length} ${t.filesSelected}`;summary.title=files.map(f=>f.name).join("\n")}async function inspect(){updateFileSummary();const file=$("file").files[0];if(!file)return;const body=new FormData();body.append("file",file);statusKey("inspecting");try{const res=await fetch("/api/inspect",{method:"POST",body});const data=await res.json();if(!res.ok)throw Error(data.detail||window.DataToolkitI18n.t("inspectionFailed"));render(data);statusKey("ready")}catch(e){status(e.message)}}async function request(url,body){const res=await fetch(url,{method:"POST",body});if(!res.ok){const d=await res.json();throw Error(d.detail||window.DataToolkitI18n.t("requestFailed"))}return res}function download(blob,name){const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),3000)}function bodyFor(files){const body=new FormData();for(const file of files)body.append(activeTab==="batch"?"files":"file",file);body.append("output_format",$("format").value);body.append("options",JSON.stringify(options()));body.append("required",JSON.stringify($("required").value.split(",").map(x=>x.trim()).filter(Boolean)));body.append("schema",$("validationSchema").value.trim()||"{}");return body}async function run(background=false){const files=Array.from($("file").files);if(!files.length)return statusKey("selectFile");if(activeTab!=="batch"&&files.length>1)return statusKey("selectOne");try{const body=bodyFor(files);const url=activeTab==="batch"?"/api/batch":activeTab==="validate"?"/api/validate":background?"/api/jobs":"/api/convert";statusKey("processing");const res=await request(url,body);if(activeTab==="validate"){const data=await res.json();window.dataToolkitValidation.render(data);$("jobState").textContent=data.valid?window.DataToolkitI18n.t("validationPassed"):window.DataToolkitI18n.t("validationIssues",{count:data.issue_count});statusKey(data.valid?"valid":"validationFound")}else if(background){currentJob=await res.json();$("cancel").hidden=false;watchJob(currentJob);statusKey("jobQueued")}else{download(await res.blob(),activeTab==="batch"?"data-toolkit-batch.zip":`result.${$("format").value}`);statusKey("completed")}}catch(e){status(e.message)}}async function watchJob(job){const source=new EventSource(`/api/jobs/${encodeURIComponent(job.id)}/events?token=${encodeURIComponent(job.token)}`);source.addEventListener("status",event=>{const data=JSON.parse(event.data);$("jobState").textContent=window.DataToolkitI18n.t("jobState",{state:window.DataToolkitI18n.t(data.state),progress:data.progress??0})+(data.error?`: ${data.error}`:"");if(["completed","failed","cancelled"].includes(data.state)){source.close();$("cancel").hidden=true;if(data.state==="completed")downloadJob(job)}});source.onerror=()=>{source.close();$("jobState").textContent=window.DataToolkitI18n.t("connectionInterrupted")}}async function downloadJob(job){const res=await fetch(`/api/jobs/${encodeURIComponent(job.id)}/download?token=${encodeURIComponent(job.token)}`);if(res.ok)download(await res.blob(),`result.${$("format").value}`)}$("file").addEventListener("change",()=>window.dataToolkitPreview?.onFilesChanged());$("run").addEventListener("click",()=>run());$("async").addEventListener("click",()=>run(true));$("cancel").addEventListener("click",async()=>{if(!currentJob)return;const res=await fetch(`/api/jobs/${currentJob.id}/cancel`,{method:"POST",headers:{"X-Job-Token":currentJob.token}});$("jobState").textContent=res.ok?window.DataToolkitI18n.t("cancelRequested"):window.DataToolkitI18n.t("cancelFailed")});document.querySelectorAll("[data-tab]").forEach(btn=>btn.addEventListener("click",()=>{activeTab=btn.dataset.tab;document.querySelectorAll("[data-tab]").forEach(b=>b.classList.toggle("active",b===btn));$("controls").hidden=activeTab==="validate";$("requiredWrap").hidden=activeTab!=="validate";$("validationSchemaWrap").hidden=activeTab!=="validate";$("format").parentElement.hidden=activeTab==="validate";$("async").hidden=activeTab!=="convert";$("run").textContent=activeTab==="validate"?window.DataToolkitI18n.t("validationRun"):activeTab==="batch"?window.DataToolkitI18n.t("batchRun"):(translations[$("locale").value]||translations.ko).download}));$("locale").addEventListener("change",e=>setLocale(e.target.value));function applyTheme(theme){const dark=theme==="dark"||(theme==="system"&&matchMedia("(prefers-color-scheme: dark)").matches);document.body.classList.toggle("dark",dark);document.body.classList.toggle("warm",theme==="warm");document.documentElement.dataset.theme=theme==="warm"?"warm":dark?"dark":"light"}const systemTheme=matchMedia("(prefers-color-scheme: dark)");systemTheme.addEventListener?.("change",()=>{if($("theme").value==="system")applyTheme("system")});$("theme").addEventListener("change",e=>{applyTheme(e.target.value);localStorage.setItem("dataToolkit.theme",e.target.value)});const drop=$("drop");drop.addEventListener("dragover",e=>{e.preventDefault();drop.classList.add("drag")});drop.addEventListener("dragleave",()=>drop.classList.remove("drag"));drop.addEventListener("drop",e=>{e.preventDefault();drop.classList.remove("drag");$("file").files=e.dataTransfer.files;window.dataToolkitPreview?.onFilesChanged()});$("locale").value=window.DataToolkitI18n.getLocale();setLocale($("locale").value);$("theme").value=localStorage.getItem("dataToolkit.theme")||"system";$("theme").dispatchEvent(new Event("change"));
+(function(){
+const file=document.getElementById("file");
+const list=document.getElementById("fileList");
+const clear=document.getElementById("clearFiles");
+const empty=document.getElementById("previewEmpty");
+const run=document.getElementById("run");
+const asyncButton=document.getElementById("async");
+const locale=document.getElementById("locale");
+const labels=window.DataToolkitI18n.group("files");
+function dict(){return labels[locale.value]||labels.ko}
+function refresh(){
+const files=Array.from(file.files);list.replaceChildren();
+for(const item of files){const li=document.createElement("li");const name=document.createElement("span");name.textContent=item.name;const size=document.createElement("span");size.textContent=window.dataToolkitFormatSize(item.size);const remove=document.createElement("button");remove.type="button";remove.className="file-remove secondary";remove.textContent=({ko:"제거",ja:"削除","zh-CN":"移除"}[locale.value]||"Remove");remove.setAttribute("aria-label",`${remove.textContent}: ${item.name}`);remove.addEventListener("click",()=>window.dataToolkitPreview?.removeFile(item));const index=files.indexOf(item);const state=window.dataToolkitPreview?.getFileState(index);if(state){const badge=document.createElement("span");badge.className=`file-state ${state==="fileInvalid"?"is-invalid":"is-valid"}`;badge.textContent=window.DataToolkitI18n.t(state);li.append(name,badge,size,remove)}else li.append(name,size,remove);list.append(li)}
+clear.disabled=files.length===0;run.disabled=files.length===0;asyncButton.disabled=files.length===0;
+empty.hidden=files.length!==0;
+if(!files.length){document.getElementById("table").replaceChildren();document.getElementById("stats").textContent="";document.getElementById("jobState").textContent=""}
+}
+function translate(){clear.textContent=dict().clear;empty.textContent=dict().previewEmpty;const tab=document.querySelector("[data-tab].active")?.dataset.tab;if(tab==="validate")run.textContent=dict().validate;if(tab==="batch")run.textContent=dict().batchRun;refresh()}
+clear.addEventListener("click",()=>{file.value="";file.dispatchEvent(new Event("change"));statusKey("ready");document.getElementById("selectedFiles").textContent=dict().none;refresh()});
+file.addEventListener("change",refresh);document.addEventListener("dataToolkit:fileStateChanged",refresh);
+locale.addEventListener("change",()=>queueMicrotask(translate));
+document.querySelectorAll("[data-tab]").forEach(btn=>btn.addEventListener("click",()=>queueMicrotask(translate)));
+refresh();translate();
+})();
+
+(function(){
+const localizations=window.DataToolkitI18n.group("layout");
+const language=document.getElementById("locale");
+
+const buttons=document.querySelectorAll("[data-tab]");const history=document.getElementById("historyPanel");const grid=document.querySelector(".workspace-grid");const actions=document.getElementById("actions");const advanced=document.getElementById("controls");const preview=document.getElementById("previewPanel");
+buttons.forEach(button=>button.addEventListener("click",()=>{const isHistory=button.dataset.tab==="history";buttons.forEach(b=>b.classList.toggle("active",b===button));history.hidden=!isHistory;grid.hidden=isHistory;actions.hidden=isHistory;advanced.hidden=isHistory;if(!isHistory){advanced.hidden=button.dataset.tab==="validate";document.getElementById("requiredWrap").hidden=button.dataset.tab!=="validate";document.getElementById("validationSchemaWrap").hidden=button.dataset.tab!=="validate";document.getElementById("format").parentElement.hidden=button.dataset.tab==="validate";document.getElementById("async").hidden=button.dataset.tab!=="convert";document.getElementById("run").textContent=button.dataset.tab==="validate"?window.DataToolkitI18n.t("validationRun"):button.dataset.tab==="batch"?window.DataToolkitI18n.t("batchRun"):(translations[language.value]||translations.ko).download}}));
+const lookup=document.getElementById("lookupJob");const historyActions=document.getElementById("historyActions");let historyJob=null;
+const historyText=window.DataToolkitI18n.group("history");
+function historyLabels(){const t=historyText[language.value]||historyText.ko;document.getElementById("historyDownload").textContent=t.download;document.getElementById("historyDelete").textContent=t.remove;return t}
+language.addEventListener("change",historyLabels);historyLabels();
+lookup.addEventListener("click",async()=>{const id=document.getElementById("historyId").value.trim();const token=document.getElementById("historyToken").value.trim();const output=document.getElementById("historyResult");const t=historyLabels();historyJob=null;historyActions.hidden=true;if(!/^[a-f0-9]{32}$/.test(id)||!token){output.textContent=t.invalid;return}output.textContent=t.loading;try{const res=await fetch(`/api/jobs/${encodeURIComponent(id)}`,{headers:{"X-Job-Token":token},cache:"no-store"});if(!res.ok)throw Error(t.missing);const data=await res.json();historyJob={id,token,data};output.textContent=JSON.stringify(data,null,2);historyActions.hidden=false;document.getElementById("historyDownload").disabled=!data.download_available;document.getElementById("historyDelete").disabled=["queued","running"].includes(data.state)}catch(e){output.textContent=e.message}});
+document.getElementById("historyDownload").addEventListener("click",async()=>{if(!historyJob)return;const {id,token,data}=historyJob;const res=await fetch(`/api/jobs/${encodeURIComponent(id)}/download`,{headers:{"X-Job-Token":token},cache:"no-store"});if(!res.ok){document.getElementById("historyResult").textContent=window.DataToolkitI18n.t("downloadFailed",{status:res.status});return}const url=URL.createObjectURL(await res.blob());const link=document.createElement("a");link.href=url;link.download=data.filename||"result.bin";link.click();setTimeout(()=>URL.revokeObjectURL(url),3000)});
+document.getElementById("historyDelete").addEventListener("click",async()=>{if(!historyJob||!confirm(historyLabels().confirm))return;const {id,token}=historyJob;const res=await fetch(`/api/jobs/${encodeURIComponent(id)}`,{method:"DELETE",headers:{"X-Job-Token":token}});if(res.ok){historyJob=null;historyActions.hidden=true;document.getElementById("historyResult").textContent=window.DataToolkitI18n.t("deleted")}else{document.getElementById("historyResult").textContent=window.DataToolkitI18n.t("deleteFailed",{status:res.status})}});
+const table=document.getElementById("table");const placeholder=document.getElementById("resultPlaceholder");const state=document.getElementById("resultState");const observer=new MutationObserver(()=>{placeholder.hidden=table.rows.length>0});observer.observe(table,{childList:true});document.getElementById("file").addEventListener("change",()=>{state.textContent=document.getElementById("file").files.length?window.DataToolkitI18n.t("selected"):window.DataToolkitI18n.t("ready")});
+})();
+
+(function(){
+const button=document.getElementById("backToTop");
+if(!button)return;
+const titles=window.DataToolkitI18n.group("navigation");
+const update=()=>{button.hidden=window.scrollY<=200;const language=document.getElementById("locale")?.value||"ko";button.setAttribute("aria-label",titles[language]||titles.ko);button.title=titles[language]||titles.ko};
+button.addEventListener("click",()=>window.scrollTo({top:0,behavior:window.matchMedia("(prefers-reduced-motion: reduce)").matches?"auto":"smooth"}));
+window.addEventListener("scroll",update,{passive:true});
+document.getElementById("locale")?.addEventListener("change",update);
+update();
+})();
+
+(function(){
+const file=document.getElementById("file");
+const table=document.getElementById("table");
+const pageInfo=document.getElementById("pageInfo");
+const pagination=document.getElementById("previewPagination");
+const tools=document.getElementById("previewTools");
+const previewFile=document.getElementById("previewFile");
+const sheet=document.getElementById("sheet");
+const sheetWrap=document.getElementById("sheetWrap");
+const pageSize=document.getElementById("pageSize");
+const error=document.getElementById("previewError");
+const stats=document.getElementById("stats");
+let selected=0,page=1,pages=1,sequence=0;const fileStates=new Map();let lastError=null;
+const words=window.DataToolkitI18n.group("preview");
+function t(){return words[document.getElementById("locale").value]||words.ko}
+function fileSize(n){return n<1024?`${n} B`:n<1048576?`${(n/1024).toFixed(1)} KB`:`${(n/1048576).toFixed(2)} MB`}
+window.dataToolkitFormatSize=fileSize;
+function reset(){table.replaceChildren();stats.textContent="";error.hidden=true;pagination.hidden=true;document.getElementById("previewEmpty").hidden=false;document.getElementById("resultPlaceholder").hidden=false;sourceColumns=[];for(const id of ["columns","filterCol","sortCol"]){const element=document.getElementById(id);element.replaceChildren();if(id!=="columns"){const option=document.createElement("option");option.value="";option.textContent=window.DataToolkitI18n.t("none");element.append(option)}}}
+function errorMessage(detail){const i18n=window.DataToolkitI18n;const raw=String(detail||"");const position=raw.match(/line (\d+) column (\d+)/i);const params={line:position?.[1]||"?",column:position?.[2]||"?"};if(/Expected an array of flat objects/i.test(raw))return i18n.t("invalidFlatArray");if(/Expecting|JSONDecodeError|Unterminated string|Extra data|Invalid \escape|Invalid control character|Unterminated|delimiter|JSON/i.test(raw)&&position)return i18n.t("invalidJsonPosition",params);if(/Expecting|JSONDecodeError|Unterminated string|Extra data|Invalid \escape|Invalid control character/i.test(raw))return i18n.t("invalidJson");return i18n.t("inspectionFailed")}
+function updateOption(index){const option=previewFile.options[index];if(!option)return;const name=file.files[index]?.name||"";const state=fileStates.get(index);option.textContent=state?`${name} — ${window.DataToolkitI18n.t(state)}`:name}
+function showError(){if(!lastError)return;const message=errorMessage(lastError);error.textContent=`${t().failed}: ${message}`;error.hidden=false;document.getElementById("previewEmpty").hidden=true;document.getElementById("resultPlaceholder").hidden=true;statusKey("fileInvalid");document.getElementById("resultState").textContent=window.DataToolkitI18n.t("error")}
+function renderPreview(data){
+render(data);
+page=data.page;pages=data.page_count;
+const item=file.files[selected];stats.textContent=`${data.row_count} ${t().rows} · ${data.columns.length} ${t().columns} · ${t().size}: ${fileSize(item.size)}`;
+pageInfo.textContent=`${t().page} ${page} ${t().of} ${pages}`;
+pagination.hidden=false;
+document.getElementById("prevPage").disabled=page<=1;
+document.getElementById("nextPage").disabled=page>=pages;
+document.getElementById("previewEmpty").hidden=true;
+document.getElementById("resultPlaceholder").hidden=true;
+if(data.format==="xlsx"){
+const previous=sheet.value;
+sheet.replaceChildren();for(const name of data.sheets){const option=document.createElement("option");option.value=name;option.textContent=name;sheet.append(option)}
+sheet.value=data.sheet||previous;sheetWrap.hidden=false;
+}else{sheet.replaceChildren();sheetWrap.hidden=true}
+}
+async function load(){
+const files=Array.from(file.files);const item=files[selected];const id=++sequence;
+if(!item){reset();return}
+const body=new FormData();body.append("file",item);body.append("page",String(page));body.append("page_size",pageSize.value);
+if(sheet.value&&item.name.toLowerCase().endsWith(".xlsx"))body.append("sheet",sheet.value);
+error.hidden=true;statusKey("inspecting");
+try{
+const response=await fetch("/api/inspect",{method:"POST",body});const data=await response.json();if(id!==sequence)return;
+if(!response.ok)throw Error(typeof data.detail==="string"?data.detail:window.DataToolkitI18n.t("inspectionFailed"));
+lastError=null;fileStates.set(selected,"fileValid");updateOption(selected);document.dispatchEvent(new Event("dataToolkit:fileStateChanged"));renderPreview(data);statusKey("ready");document.getElementById("resultState").textContent=window.DataToolkitI18n.t("ready");
+}catch(exc){if(id!==sequence)return;reset();lastError=exc.message;fileStates.set(selected,"fileInvalid");updateOption(selected);document.dispatchEvent(new Event("dataToolkit:fileStateChanged"));showError()}
+}
+function onFilesChanged(){sequence++;fileStates.clear();document.dispatchEvent(new Event("dataToolkit:fileStateChanged"));lastError=null;selected=0;page=1;sheet.replaceChildren();const files=Array.from(file.files);previewFile.replaceChildren();files.forEach((item,index)=>{const option=document.createElement("option");option.value=String(index);option.textContent=item.name;previewFile.append(option)});tools.hidden=!files.length;reset();updateFileSummary();if(files.length)load()}
+function removeFile(item){const transfer=new DataTransfer();for(const candidate of file.files)if(candidate!==item)transfer.items.add(candidate);file.files=transfer.files;file.dispatchEvent(new Event("change"))}
+previewFile.addEventListener("change",()=>{selected=Number(previewFile.value);page=1;lastError=null;sheet.replaceChildren();load()});
+sheet.addEventListener("change",()=>{page=1;load()});pageSize.addEventListener("change",()=>{page=1;load()});
+document.getElementById("prevPage").addEventListener("click",()=>{if(page>1){page--;load()}});
+document.getElementById("nextPage").addEventListener("click",()=>{if(page<pages){page++;load()}});
+document.getElementById("locale").addEventListener("change",()=>{for(const key of ["previewFile","sheet","pageSize","previous","next"]){document.querySelectorAll(`[data-i18n="${key}"]`).forEach(el=>el.textContent=t()[key])}for(let index=0;index<file.files.length;index++)updateOption(index);if(lastError)showError();else if(file.files.length)load()});
+window.dataToolkitPreview={onFilesChanged,removeFile,getFileState:index=>fileStates.get(index)};
+})();
+
+(function(){
+const labels=window.DataToolkitI18n.group("validation");
+let last=null;
+function dictionary(){return labels[document.getElementById("locale").value]||labels.ko}
+function render(data){last=data;const wrap=document.getElementById("validationReport");wrap.hidden=false;const dict=dictionary();document.getElementById("validationSummary").textContent=window.DataToolkitI18n.t("validationSummary",{label:dict.summary,result:data.valid?"PASS":"FAIL",rows:data.row_count,issues:data.issue_count,truncated:data.truncated?window.DataToolkitI18n.t("validationTruncated"):""});const table=document.getElementById("validationIssues");table.replaceChildren();const header=document.createElement("tr");for(const key of ["row","column","code","severity","message"]){const th=document.createElement("th");th.textContent=dict[key];header.append(th)}table.append(header);for(const issue of data.issues){const tr=document.createElement("tr");for(const key of ["row","column","code","severity","message"]){const td=document.createElement("td");td.textContent=issue[key]===null?"—":String(issue[key]);tr.append(td)}table.append(tr)}}
+async function saveReport(fmt){const file=document.getElementById("file").files[0];if(!file)return;const body=new FormData();body.append("file",file);body.append("required",JSON.stringify(document.getElementById("required").value.split(",").map(v=>v.trim()).filter(Boolean)));body.append("schema",document.getElementById("validationSchema").value.trim()||"{}");body.append("report_format",fmt);try{const response=await fetch("/api/validate/report",{method:"POST",body});if(!response.ok){const error=await response.json();throw Error(error.detail||window.DataToolkitI18n.t("reportFailed"))}download(await response.blob(),`validation-report.${fmt}`)}catch(error){status(error.message)}}
+document.getElementById("reportJson").addEventListener("click",()=>saveReport("json"));document.getElementById("reportCsv").addEventListener("click",()=>saveReport("csv"));document.getElementById("file").addEventListener("change",()=>{last=null;document.getElementById("validationReport").hidden=true});document.getElementById("locale").addEventListener("change",()=>{if(last)render(last)});window.dataToolkitValidation={render};
+})();
